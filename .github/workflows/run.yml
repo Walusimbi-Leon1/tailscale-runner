@@ -1,0 +1,53 @@
+name: tailscale-runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "How long to stay connected (seconds)"
+        required: false
+        default: "7200"
+      authkey:
+        description: "Tailscale auth key (overrides TS_AUTHKEY secret if provided)"
+        required: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150   # 150m > 7200s headroom; workflow self-terminates at duration
+    steps:
+      - name: Install Tailscale
+        run: curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Bring up tailnet & hold for the duration
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+          DURATION: ${{ github.event.inputs.duration || '7200' }}
+          AUTHKEY_INPUT: ${{ github.event.inputs.authkey }}
+        run: |
+          set -euo pipefail
+          KEY="${AUTHKEY_INPUT:-$TS_AUTHKEY}"
+          if [ -z "$KEY" ]; then
+            echo "::error::No Tailscale auth key provided (set TS_AUTHKEY secret or pass authkey input)"
+            exit 1
+          fi
+
+          # Start the daemon in userspace networking mode (no root/tun needed
+          # on the runner). Must run in THIS step so the process group stays
+          # alive for the full hold — a backgrounded daemon from a prior step
+          # would be killed when that step exits.
+          echo "Starting tailscaled..."
+          sudo tailscaled --tun=userspace-networking &> /tmp/tailscaled.log &
+          sleep 3
+
+          echo "Connecting to tailnet..."
+          sudo tailscale up --auth-key="$KEY" --ssh --accept-routes --advertise-exit-node
+
+          echo "Connected. Tailnet status:"
+          sudo tailscale status || true
+
+          echo "Holding for ${DURATION}s..."
+          sleep "$DURATION"
+
+          echo "Time elapsed — disconnecting and exiting."
+          sudo tailscale down || true
